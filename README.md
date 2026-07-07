@@ -61,7 +61,7 @@ Removes the patch marker, unholds the distro `libccid` package (on apt), and rei
 
 ## Background
 
-These patches were originally developed for the [VoWiFi gateway](https://github.com/vhu231/vowifi_gateway) project and are maintained here as a standalone fix for anyone using the HSIC reader on Linux.
+These patches were originally developed for the [VoWiFi gateway](https://github.com/pagecat/vowifi_gateway) project and are maintained here as a standalone fix for anyone using the HSIC reader on Linux.
 
 ### What each patch does
 
