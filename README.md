@@ -1,10 +1,34 @@
 # Fix-HSIC-CCID-Reader
 
+[中文说明](README_ZH.md)
+
 Patches and installer for the **HSIC CCID-Reader** (USB `1d99:0016`) on Linux.
 
-The stock [libccid](https://github.com/LudovicRousseau/CCID) driver cannot use this reader reliably because its firmware always answers **"no ICC present"** to `GetSlotStatus`, even when a SIM is inserted. The driver therefore never powers the card. Some SIMs also return ATRs with a missing TCK byte, which breaks `SCardConnect`.
+> **Disambiguation:** **HSIC** here refers to [**上海华申智能卡应用系统有限公司**](https://ccid.apdu.fr/ccid/readers/HSIC_CCID-Reader.txt) (Shanghai Huashen Smart Card Application System Co., Ltd.), the manufacturer of this CCID reader — not other organizations that use the same acronym (e.g. High-Speed Inter-Chip, hardware security modules, etc.).
 
-This project builds libccid from source with targeted fixes and installs the patched driver into the pcsc-lite driver directory.
+The stock [libccid/ccid](https://github.com/LudovicRousseau/CCID) driver (the pcsc-lite CCID IFD driver — packaged as `libccid` on Debian/Ubuntu and often as `ccid` on other distros) cannot use this reader reliably because its firmware always answers **"no ICC present"** to `GetSlotStatus`, even when a SIM is inserted. The driver therefore never powers the card. Some SIMs also return ATRs with a missing TCK byte, which breaks `SCardConnect`.
+
+This project builds [libccid/ccid](https://github.com/LudovicRousseau/CCID) from source with targeted fixes and installs the patched driver into the pcsc-lite driver directory.
+
+## Reader specifications
+
+Identified on Linux as **HSIC CCID-Reader** (`1d99:0016`). Full CCID descriptor dump: [ccid.apdu.fr — HSIC_CCID-Reader](https://ccid.apdu.fr/ccid/readers/HSIC_CCID-Reader.txt).
+
+| Property | Value |
+|----------|-------|
+| Vendor ID | `0x1D99` (HSIC) |
+| Product ID | `0x0016` |
+| Product name | CCID-Reader |
+| Firmware (`bcdDevice`) | 1.00 |
+| CCID version | 1.10 |
+| Slots | 1 (`bMaxSlotIndex: 0`) |
+| Voltage | 5.0 V, 3.0 V |
+| Protocols | T=0, T=1 |
+| Clock | 4.000 MHz (default and maximum) |
+| Data rates | 10752, 15625, 31250, 62500, 125000, 250000 bps |
+| Features | TPDU level exchange (`dwFeatures: 0x00010000`) |
+| Max CCID message | 271 bytes |
+| Endpoints | bulk-IN, bulk-OUT, Interrupt-IN |
 
 ## Quick start
 
@@ -40,14 +64,14 @@ Replug the reader or restart `pcscd`, then verify with `pcsc_scan`.
 - Root for install/uninstall
 - Build tools: meson, ninja, gcc, flex, libusb, zlib (the installer installs these via your package manager)
 
-The driver is built from **libccid 1.6.2**, which already lists `1d99:0016` in its supported-reader table. Older distro packages (< 1.6.2) may not recognize the VID/PID without manual `Info.plist` edits — this build does not need that.
+The driver is built from upstream [libccid/ccid 1.6.2](https://github.com/LudovicRousseau/CCID), which already lists `1d99:0016` in its supported-reader table. Older distro `libccid`/`ccid` packages (< 1.6.2) may not recognize the VID/PID without manual `Info.plist` edits — this build does not need that.
 
 ## Configuration
 
 Optional `.env` next to `install.sh`:
 
 ```bash
-CCID_VERSION=1.6.2   # libccid tag to build
+CCID_VERSION=1.6.2   # upstream libccid tag to build
 PATCH_SET=slot       # default patch set for `install` with no argument
 ```
 
@@ -57,7 +81,7 @@ PATCH_SET=slot       # default patch set for `install` with no argument
 sudo ./install.sh uninstall
 ```
 
-Removes the patch marker, unholds the distro `libccid` package (on apt), and reinstalls the stock driver.
+Removes the patch marker, unholds the distro `libccid`/`ccid` package (e.g. `libccid` on Debian/Ubuntu, `ccid` on Fedora/Arch), and reinstalls the stock driver.
 
 ## Background
 
@@ -71,4 +95,4 @@ These patches were originally developed for the [VoWiFi gateway](https://github.
 
 ## License
 
-The patches modify libccid, which is licensed under LGPL-2.1+. See the upstream CCID project for details.
+The patches modify [libccid/ccid](https://github.com/LudovicRousseau/CCID), which is licensed under LGPL-2.1+. See the [upstream CCID project](https://github.com/LudovicRousseau/CCID) for details.
