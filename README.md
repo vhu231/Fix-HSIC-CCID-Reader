@@ -28,7 +28,7 @@ Replug the reader or restart `pcscd`, then verify with `pcsc_scan`.
 
 | Set | Patch | What it fixes |
 |-----|-------|---------------|
-| `slot` | `01_hsic_slot_status.patch` | Tracks card presence from `NotifySlotChange` interrupts instead of broken `GetSlotStatus`. **Recommended default.** |
+| `slot` | `01_hsic_slot_status.patch` | Debounced `NotifySlotChange` + ATR probe on `IFDHICCPresence` tick instead of broken `GetSlotStatus`. **Recommended default.** |
 | `atr` | `02_hsic_malformed_atr.patch` | Synthesizes the missing ATR TCK byte and falls back to default T=0 parameters when needed. |
 | `all` | both | Use when your (U)SIM ATR is rejected by the stock driver. |
 
@@ -65,7 +65,7 @@ These patches were originally developed for the [VoWiFi gateway](https://github.
 
 ### What each patch does
 
-**01 — Slot status:** The reader's interrupt endpoint sends correct `RDR_to_PC_NotifySlotChange` messages. The patch records that state and uses it in `IFDHICCPresence` when `GetSlotStatus` lies. On first use it probes by attempting power-on.
+**01 — Slot status:** The reader's interrupt endpoint sends `RDR_to_PC_NotifySlotChange` messages. Notify only sets a `hsic_presence_pending` flag (debounce). On each `IFDHICCPresence` tick the driver probes with `IccPowerOn`/ATR, updates presence, and restores the previous power state. Initial probe runs on first poll when presence is still unknown.
 
 **02 — Malformed ATR:** HSIC firmware omits the final TCK byte from the ATR. The patch computes it (ISO 7816-3 XOR) at power-on. If parsing still fails, default T=0 protocol parameters are applied so TPDU exchange can proceed.
 
