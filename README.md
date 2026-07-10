@@ -8,7 +8,7 @@ Patches and installer for the **HSIC CCID-Reader** (USB `1d99:0016`) on Linux.
 
 The stock [libccid/ccid](https://github.com/LudovicRousseau/CCID) driver (the pcsc-lite CCID IFD driver — packaged as `libccid` on Debian/Ubuntu and often as `ccid` on other distros) cannot use this reader reliably because its firmware always answers **"no ICC present"** to `GetSlotStatus`, even when a SIM is inserted. The driver therefore never powers the card. Some SIMs also return ATRs with a missing TCK byte, which breaks `SCardConnect`.
 
-This project builds [libccid/ccid](https://github.com/LudovicRousseau/CCID) from source with targeted fixes and installs the patched driver into the pcsc-lite driver directory.
+This repository **only ships patches and installer scripts**. At install (and when regenerating patches), [libccid/ccid](https://github.com/LudovicRousseau/CCID) source is downloaded from upstream GitHub tags, patched, built, and installed into the pcsc-lite driver directory. No upstream tree is committed here.
 
 ## Reader specifications
 
@@ -87,7 +87,7 @@ Notes:
 
 - The **1.5.5** family also patches `readers/supported_readers.txt` so `1d99:0016` is recognized (upstream added HSIC in 1.6.2).
 - Other distros work the same way as long as the installed package version normalizes to one of the families above.
-- To regenerate patches: put upstream trees in `.ccid-src/` and run `python3 tools/gen_ubuntu_patches.py`.
+- Layout: `patches/<family>/` + `install.sh` / `oneclick.sh`. Upstream tarballs are fetched at build time; regenerating patches is `python3 tools/gen_ubuntu_patches.py` (downloads tags into a local `.ccid-src/` cache, gitignored).
 
 ## Requirements
 

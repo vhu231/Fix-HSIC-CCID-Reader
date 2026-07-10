@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Generate HSIC CCID patches for Ubuntu 20.04+ APT libccid upstream tags."""
+"""Generate HSIC CCID patches from upstream LudovicRousseau/CCID tags.
+
+This repo only ships patches/ + installer scripts. Upstream source is never
+committed — this tool downloads tags on demand (cached under .ccid-src/, gitignored).
+
+  python3 tools/gen_ubuntu_patches.py          # all shipped families
+  python3 tools/gen_ubuntu_patches.py 1.6.2    # one tag
+"""
 from __future__ import annotations
 
 import difflib
@@ -8,11 +15,15 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.request
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-SRC_ROOT = REPO / ".ccid-src"
+SRC_ROOT = REPO / ".ccid-src"  # download cache only (gitignored)
 PATCHES = REPO / "patches"
+UPSTREAM_TAG_URL = (
+    "https://github.com/LudovicRousseau/CCID/archive/refs/tags/{version}.tar.gz"
+)
 
 # Shipped build targets (families). Ubuntu APT minors map onto these in install.sh:
 #   1.4.x / 1.5.x → 1.5.5   (20.04–24.04)
@@ -586,10 +597,34 @@ def stage_for_verify(src: Path, work: Path, rels: list[str]) -> None:
     stage_files(src, work, rels)
 
 
+def fetch_upstream(version: str) -> Path:
+    """Download + extract upstream CCID-<version> into SRC_ROOT (cached)."""
+    dest = SRC_ROOT / f"CCID-{version}"
+    if dest.is_dir() and (dest / "src").is_dir():
+        print(f"cache hit {dest}")
+        return dest
+
+    SRC_ROOT.mkdir(parents=True, exist_ok=True)
+    url = UPSTREAM_TAG_URL.format(version=version)
+    tar_path = SRC_ROOT / f"{version}.tar.gz"
+    print(f"fetch {url}")
+    urllib.request.urlretrieve(url, tar_path)
+
+    if dest.exists():
+        shutil.rmtree(dest)
+    subprocess.run(
+        ["tar", "xf", str(tar_path), "-C", str(SRC_ROOT)],
+        check=True,
+    )
+    tar_path.unlink(missing_ok=True)
+
+    if not dest.is_dir():
+        raise FileNotFoundError(f"extract failed: expected {dest}")
+    return dest
+
+
 def generate_for_version(version: str) -> None:
-    src = SRC_ROOT / f"CCID-{version}"
-    if not src.is_dir():
-        raise FileNotFoundError(src)
+    src = fetch_upstream(version)
 
     out = PATCHES / version
     out.mkdir(parents=True, exist_ok=True)

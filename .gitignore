@@ -1,4 +1,6 @@
 .env
 *.swp
 *~
+# Upstream CCID download cache (install/gen pull from GitHub; never commit)
 .ccid-src/
+*.tar.gz

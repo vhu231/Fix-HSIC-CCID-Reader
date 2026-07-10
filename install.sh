@@ -2,6 +2,10 @@
 # install.sh — build and install a patched libccid driver for the HSIC CCID-Reader
 # (USB VID:PID 1d99:0016).
 #
+# This repo only ships patches/ + scripts. Upstream CCID source is always
+# downloaded from https://github.com/LudovicRousseau/CCID (tag tarball), then
+# patched and built locally — nothing from upstream is committed here.
+#
 # The stock driver never powers the SIM because the reader firmware always answers
 # "no ICC present" to GetSlotStatus. These patches fix that and optionally repair
 # malformed ATRs (missing TCK byte).
@@ -11,15 +15,14 @@
 #   sudo ./install.sh uninstall                # remove patched driver, restore distro
 #   ./install.sh status
 #
-# Version selection (patches live under patches/<upstream-tag>/):
-#   1. If CCID_VERSION is set → build that tag (must have a matching patch dir)
-#   2. Else detect the installed distro libccid/ccid version
-#   3. If patches/<detected>/ exists → build that version
-#   4. Else fall back to FALLBACK_CCID_VERSION (default 1.6.2)
-#   5. If patch apply / build fails on a non-fallback target → retry fallback
+# Version selection (patches live under patches/<family>/):
+#   1. If CCID_VERSION is set → map/pin to a shipped family
+#   2. Else detect installed distro libccid/ccid → map to family
+#   3. Else fall back to FALLBACK_CCID_VERSION (default 1.6.2)
+#   4. If patch/build fails on a non-fallback target → retry fallback
 #
 # Env (or a .env file next to this script):
-#   CCID_VERSION            pin upstream tag (disables auto-detect)
+#   CCID_VERSION            pin upstream tag / family (disables auto-detect)
 #   FALLBACK_CCID_VERSION   known-good fallback tag (default 1.6.2)
 #   PATCH_SET               default patch set (slot|atr|all)
 set -eu

@@ -8,7 +8,7 @@
 
 原版 [libccid/ccid](https://github.com/LudovicRousseau/CCID) 驱动（pcsc-lite 的 CCID IFD 驱动——Debian/Ubuntu 发行版包名为 `libccid`，其他发行版常见为 `ccid`）无法可靠地使用该读卡器：即使已插入 SIM，固件对 `GetSlotStatus` 仍始终返回 **「无 ICC 卡」**，驱动因此不会对卡上电。部分 SIM 返回的 ATR 还缺少 TCK 校验字节，会导致 `SCardConnect` 失败。
 
-本项目从源码构建 [libccid/ccid](https://github.com/LudovicRousseau/CCID)，应用针对性补丁，并将修补后的驱动安装到 pcsc-lite 驱动目录。
+本仓库**只保留补丁与安装脚本**。安装（以及重新生成补丁）时，会从上游 GitHub 拉取 [libccid/ccid](https://github.com/LudovicRousseau/CCID) 对应 tag 源码，打补丁、编译并安装到 pcsc-lite 驱动目录。上游源码树不入库。
 
 ## 读卡器规格
 
@@ -87,7 +87,7 @@ sudo ./oneclick.sh all      # slot + ATR
 
 - **1.5.5** 族还会改 `readers/supported_readers.txt`，以便识别 `1d99:0016`（上游自 1.6.2 起才收录 HSIC）。
 - 其他发行版只要包版本能归一到上述某一族，行为相同。
-- 重新生成补丁：源码放入 `.ccid-src/` 后执行 `python3 tools/gen_ubuntu_patches.py`。
+- 仓库内容：`patches/<族>/` + `install.sh` / `oneclick.sh`。构建时从上游拉 tarball；重新生成补丁：`python3 tools/gen_ubuntu_patches.py`（会下载到本地 `.ccid-src/` 缓存，已 gitignore）。
 
 ## 系统要求
 
