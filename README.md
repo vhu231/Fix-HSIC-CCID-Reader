@@ -32,23 +32,31 @@ Identified on Linux as **HSIC CCID-Reader** (`1d99:0016`). Full CCID descriptor 
 
 ## Quick start
 
+**One-click** (clone + detect libccid + build + install):
+
+```bash
+# Recommended: card-presence fix only
+curl -fsSL https://raw.githubusercontent.com/vhu231/Fix-HSIC-CCID-Reader/master/oneclick.sh | sudo sh
+
+# Also apply the ATR / SCardConnect 607 fix
+curl -fsSL https://raw.githubusercontent.com/vhu231/Fix-HSIC-CCID-Reader/master/oneclick.sh | sudo sh -s -- all
+```
+
+Or from a local clone:
+
 ```bash
 git clone https://github.com/vhu231/Fix-HSIC-CCID-Reader.git
 cd Fix-HSIC-CCID-Reader
-chmod +x install.sh
-
-# Recommended: base card-presence fix (safe for compliant cards, including eSIM)
-sudo ./install.sh install slot
-
-# If SCardConnect still fails with error 607, try the ATR fix too
-sudo ./install.sh install all
-
+sudo ./oneclick.sh          # same as: sudo ./install.sh install slot
+sudo ./oneclick.sh all      # slot + ATR
 ./install.sh status
 ```
 
-Replug the reader or restart `pcscd`, then verify with `pcsc_scan`.
+`oneclick` / `install` auto-detects the installed `libccid`/`ccid` package, picks one of the three patch families below, builds that upstream tag, and installs it over the distro driver. Replug the reader or restart `pcscd`, then verify with `pcsc_scan`.
 
 ## Patch sets
+
+Each family directory contains the same two patch files:
 
 | Set | Patch | What it fixes |
 |-----|-------|---------------|
@@ -58,22 +66,46 @@ Replug the reader or restart `pcscd`, then verify with `pcsc_scan`.
 
 **Compatibility:** `slot` alone is enough for standards-compliant cards (including physical eSIM). Only use `atr` or `all` if you hit ATR / `SCardConnect` errors.
 
+## Version families (Ubuntu 20.04+)
+
+Only **three** patch directories are shipped. The installer maps the detected APT `libccid` version onto a family and builds that upstream tag (the whole IFD driver is replaced, so every APT minor does not need its own folder):
+
+| Family dir | Builds upstream | Ubuntu / APT `libccid` | Build system |
+|------------|-----------------|------------------------|--------------|
+| `patches/1.5.5/` | **1.5.5** | 20.04–24.04 (`1.4.31` … `1.5.5`) | autotools |
+| `patches/1.6.2/` | **1.6.2** | 24.10–26.04 (`1.6.1` … `1.7.1`) | meson |
+| `patches/1.8.2/` | **1.8.2** | devel / 1.8+ (`1.8.x`) | meson (pointer API) |
+
+Selection rules:
+
+1. Exact `patches/<detected>/` if present  
+2. Else family map: `1.4/1.5 → 1.5.5`, `1.6/1.7 → 1.6.2`, `1.8+ → 1.8.2`  
+3. Else fall back to **1.6.2**  
+4. If patch/build fails on a non-fallback target, retry **1.6.2**
+
+Notes:
+
+- The **1.5.5** family also patches `readers/supported_readers.txt` so `1d99:0016` is recognized (upstream added HSIC in 1.6.2).
+- Other distros work the same way as long as the installed package version normalizes to one of the families above.
+- To regenerate patches: put upstream trees in `.ccid-src/` and run `python3 tools/gen_ubuntu_patches.py`.
+
 ## Requirements
 
 - Linux with pcsc-lite (`pcscd`) installed
 - Root for install/uninstall
-- Build tools: meson, ninja, gcc, flex, libusb, zlib (the installer installs these via your package manager)
-
-The driver is built from upstream [libccid/ccid 1.6.2](https://github.com/LudovicRousseau/CCID), which already lists `1d99:0016` in its supported-reader table. Older distro `libccid`/`ccid` packages (< 1.6.2) may not recognize the VID/PID without manual `Info.plist` edits — this build does not need that.
+- Build tools (installed automatically): gcc, flex, libusb, zlib, patch; plus **meson/ninja** for the 1.6.2 / 1.8.2 families, or **autoconf/automake** for 1.5.5
 
 ## Configuration
 
 Optional `.env` next to `install.sh`:
 
 ```bash
-CCID_VERSION=1.6.2   # upstream libccid tag to build
-PATCH_SET=slot       # default patch set for `install` with no argument
+# CCID_VERSION=1.5.5          # pin a shipped family (or an APT version that maps to one)
+# FALLBACK_CCID_VERSION=1.6.2 # known-good fallback when detect/build fails
+PATCH_SET=slot                  # default patch set for `install` with no argument
 ```
+
+`./install.sh status` shows the detected package version, which family would be built, and any installed patch marker.
 
 ## Uninstall
 

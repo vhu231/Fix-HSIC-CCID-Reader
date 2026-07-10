@@ -11,16 +11,33 @@
 #   sudo ./install.sh uninstall                # remove patched driver, restore distro
 #   ./install.sh status
 #
+# Version selection (patches live under patches/<upstream-tag>/):
+#   1. If CCID_VERSION is set → build that tag (must have a matching patch dir)
+#   2. Else detect the installed distro libccid/ccid version
+#   3. If patches/<detected>/ exists → build that version
+#   4. Else fall back to FALLBACK_CCID_VERSION (default 1.6.2)
+#   5. If patch apply / build fails on a non-fallback target → retry fallback
+#
 # Env (or a .env file next to this script):
-#   CCID_VERSION   libccid version to build from source   (default 1.6.2)
+#   CCID_VERSION            pin upstream tag (disables auto-detect)
+#   FALLBACK_CCID_VERSION   known-good fallback tag (default 1.6.2)
+#   PATCH_SET               default patch set (slot|atr|all)
 set -eu
 
 SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 REPO_DIR="$SELF_DIR"
 [ -f "$REPO_DIR/.env" ] && . "$REPO_DIR/.env"
 
-CCID_VERSION="${CCID_VERSION:-1.6.2}"
+# Empty = auto-detect. Keep the raw pin separate from the resolved build target.
+CCID_VERSION_PIN="${CCID_VERSION:-}"
+FALLBACK_CCID_VERSION="${FALLBACK_CCID_VERSION:-1.6.2}"
 PATCH_SET="${PATCH_SET:-slot}"
+
+# Filled by resolve_ccid_target()
+CCID_VERSION=""
+CCID_PATCH_DIR=""
+CCID_DETECTED=""
+CCID_RESOLVE_REASON=""
 
 if [ -t 1 ]; then
   B=$(printf '\033[1m'); G=$(printf '\033[32m'); Y=$(printf '\033[33m'); R=$(printf '\033[31m'); N=$(printf '\033[0m')
@@ -55,7 +72,139 @@ drivers_dir() {
   printf '%s' "$d"
 }
 
+# Normalize distro package versions to upstream X.Y.Z tags.
+# Examples: 1:1.6.2-2 → 1.6.2 ; 1.8.2-1.fc42 → 1.8.2 ; 1.6.2-r0 → 1.6.2
+normalize_ccid_version() {
+  # Strip Debian epoch, then packaging suffix, then keep X.Y.Z.
+  printf '%s' "$1" \
+    | sed 's/^[0-9][0-9]*://; s/[-+_].*$//' \
+    | sed -n 's/^\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p'
+}
+
+# Best-effort: what libccid/ccid is installed on this host right now.
+detect_installed_ccid_version() {
+  ver=""
+
+  if have dpkg-query; then
+    ver=$(dpkg-query -W -f='${Version}' libccid 2>/dev/null || true)
+  fi
+  if [ -z "$ver" ] && have rpm; then
+    ver=$(rpm -q --qf '%{VERSION}' ccid 2>/dev/null || true)
+    [ -n "$ver" ] || ver=$(rpm -q --qf '%{VERSION}' pcsc-ccid 2>/dev/null || true)
+  fi
+  if [ -z "$ver" ] && have pacman; then
+    ver=$(pacman -Q ccid 2>/dev/null | awk '{print $2}' || true)
+  fi
+  if [ -z "$ver" ] && have apk; then
+    ver=$(apk info -e -v ccid 2>/dev/null | sed -n 's/^ccid-\(.*\)$/\1/p' | head -n1 || true)
+  fi
+
+  # Fallback: Info.plist shipped with the installed IFD bundle
+  if [ -z "$ver" ]; then
+    plist="$(drivers_dir)/ifd-ccid.bundle/Contents/Info.plist"
+    if [ -f "$plist" ]; then
+      ver=$(sed -n 's/.*<string>\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)<\/string>.*/\1/p' "$plist" | head -n1 || true)
+    fi
+  fi
+
+  [ -n "$ver" ] || return 0
+  normalize_ccid_version "$ver"
+}
+
+# List build-target directories under patches/ (X.Y.Z), one per line, sorted.
+list_patch_versions() {
+  for d in "$REPO_DIR"/patches/*/; do
+    [ -d "$d" ] || continue
+    base=$(basename "$d")
+    case "$base" in
+      [0-9]*.[0-9]*.[0-9]*) printf '%s\n' "$base" ;;
+    esac
+  done | sort -t. -k1,1n -k2,2n -k3,3n
+}
+
+patch_dir_for_version() {
+  printf '%s/patches/%s' "$REPO_DIR" "$1"
+}
+
+has_patch_dir() {
+  [ -d "$(patch_dir_for_version "$1")" ]
+}
+
+# Map an installed/detected libccid version onto one of the few shipped
+# build targets (we replace the whole IFD driver, so matching the APT minor
+# exactly is unnecessary — only the source-tree family matters):
+#   1.4.x / 1.5.x  → 1.5.5   (Ubuntu 20.04–24.04; autotools)
+#   1.6.x / 1.7.x  → 1.6.2   (Ubuntu 24.10–26.04; meson, array API)
+#   1.8.x+         → 1.8.2   (pointer API)
+# Returns empty if no mapping / no patch dir.
+map_detected_to_build_target() {
+  detected="$1"
+  major=$(printf '%s' "$detected" | cut -d. -f1)
+  minor=$(printf '%s' "$detected" | cut -d. -f2)
+  target=""
+  case "$major.$minor" in
+    1.4|1.5) target=1.5.5 ;;
+    1.6|1.7) target=1.6.2 ;;
+    1.8|1.9) target=1.8.2 ;;
+    *)
+      # Future 2.x etc.: prefer highest shipped patch dir if any, else empty
+      target=""
+      ;;
+  esac
+  [ -n "$target" ] && has_patch_dir "$target" || return 0
+  printf '%s' "$target"
+}
+
+# Resolve CCID_VERSION + CCID_PATCH_DIR (+ reason / detected).
+resolve_ccid_target() {
+  CCID_DETECTED=$(detect_installed_ccid_version || true)
+  CCID_VERSION=""
+  CCID_PATCH_DIR=""
+  CCID_RESOLVE_REASON=""
+
+  if [ -n "$CCID_VERSION_PIN" ]; then
+    CCID_VERSION=$(normalize_ccid_version "$CCID_VERSION_PIN")
+    # Allow pinning either an exact patch dir, or a detected-style version
+    # that maps onto a family target.
+    if ! has_patch_dir "$CCID_VERSION"; then
+      mapped=$(map_detected_to_build_target "$CCID_VERSION" || true)
+      [ -n "$mapped" ] || die "no patch directory for pinned CCID_VERSION=$CCID_VERSION; available: $(list_patch_versions | tr '\n' ' ')"
+      CCID_VERSION="$mapped"
+    fi
+    CCID_PATCH_DIR=$(patch_dir_for_version "$CCID_VERSION")
+    CCID_RESOLVE_REASON="pinned via CCID_VERSION → $CCID_VERSION"
+    return
+  fi
+
+  if [ -n "$CCID_DETECTED" ]; then
+    # Exact dir wins (e.g. patches/1.6.2 when APT is 1.6.2)
+    if has_patch_dir "$CCID_DETECTED"; then
+      CCID_VERSION="$CCID_DETECTED"
+      CCID_PATCH_DIR=$(patch_dir_for_version "$CCID_VERSION")
+      CCID_RESOLVE_REASON="detected installed libccid $CCID_DETECTED (exact patch dir)"
+      return
+    fi
+    mapped=$(map_detected_to_build_target "$CCID_DETECTED" || true)
+    if [ -n "$mapped" ]; then
+      CCID_VERSION="$mapped"
+      CCID_PATCH_DIR=$(patch_dir_for_version "$CCID_VERSION")
+      CCID_RESOLVE_REASON="detected libccid $CCID_DETECTED → build family $CCID_VERSION"
+      return
+    fi
+    warn "installed libccid looks like $CCID_DETECTED, no matching patch family — falling back to $FALLBACK_CCID_VERSION"
+  else
+    warn "could not detect installed libccid version — falling back to $FALLBACK_CCID_VERSION"
+  fi
+
+  CCID_VERSION=$(normalize_ccid_version "$FALLBACK_CCID_VERSION")
+  has_patch_dir "$CCID_VERSION" \
+    || die "fallback patch directory missing: $(patch_dir_for_version "$CCID_VERSION")"
+  CCID_PATCH_DIR=$(patch_dir_for_version "$CCID_VERSION")
+  CCID_RESOLVE_REASON="fallback to $CCID_VERSION"
+}
+
 marker_path() {
+  # $1 = set label; uses current CCID_VERSION
   printf '%s/ifd-ccid.bundle/Contents/.hsic-ccid-%s-%s' "$(drivers_dir)" "$CCID_VERSION" "$1"
 }
 
@@ -68,59 +217,157 @@ patch_files_for_set() {
   esac
 }
 
+# $1 = ccid version being built (optional). Pre-1.6.1 needs autotools; 1.6.1+ uses meson.
 ensure_build_deps() {
-  if   have apt-get; then
-    pkg_install meson ninja-build flex gcc pkg-config perl patch wget ca-certificates libusb-1.0-0-dev zlib1g-dev
+  version="${1:-}"
+  need_autotools=0
+  need_meson=1
+  case "$version" in
+    1.4.*|1.5.*) need_autotools=1; need_meson=0 ;;
+    1.6.0)       need_autotools=1; need_meson=0 ;;
+    "")          need_autotools=1; need_meson=1 ;; # unknown: install both
+    *)           need_autotools=0; need_meson=1 ;;
+  esac
+
+  if have apt-get; then
+    pkgs="flex gcc pkg-config perl patch wget ca-certificates libusb-1.0-0-dev zlib1g-dev"
+    [ "$need_meson" = 1 ] && pkgs="$pkgs meson ninja-build"
+    [ "$need_autotools" = 1 ] && pkgs="$pkgs autoconf automake libtool make"
+    # shellcheck disable=SC2086
+    pkg_install $pkgs
     [ -f /usr/include/PCSC/pcsclite.h ] || pkg_install libpcsclite-dev
   elif have dnf || have yum; then
-    pkg_install meson ninja-build flex gcc pkgconf-pkg-config perl patch wget libusb1-devel zlib-devel
+    pkgs="flex gcc pkgconf-pkg-config perl patch wget libusb1-devel zlib-devel"
+    [ "$need_meson" = 1 ] && pkgs="$pkgs meson ninja-build"
+    [ "$need_autotools" = 1 ] && pkgs="$pkgs autoconf automake libtool make"
+    # shellcheck disable=SC2086
+    pkg_install $pkgs
     [ -f /usr/include/PCSC/pcsclite.h ] || pkg_install pcsc-lite-devel
-  elif have pacman;  then
-    pkg_install meson ninja flex gcc pkgconf perl patch wget libusb zlib
+  elif have pacman; then
+    pkgs="flex gcc pkgconf perl patch wget libusb zlib"
+    [ "$need_meson" = 1 ] && pkgs="$pkgs meson ninja"
+    [ "$need_autotools" = 1 ] && pkgs="$pkgs autoconf automake libtool make"
+    # shellcheck disable=SC2086
+    pkg_install $pkgs
     [ -f /usr/include/PCSC/pcsclite.h ] || pkg_install pcsclite
-  elif have zypper;  then
-    pkg_install meson ninja flex gcc pkg-config perl patch wget libusb-1_0-devel zlib-devel
+  elif have zypper; then
+    pkgs="flex gcc pkg-config perl patch wget libusb-1_0-devel zlib-devel"
+    [ "$need_meson" = 1 ] && pkgs="$pkgs meson ninja"
+    [ "$need_autotools" = 1 ] && pkgs="$pkgs autoconf automake libtool make"
+    # shellcheck disable=SC2086
+    pkg_install $pkgs
     [ -f /usr/include/PCSC/pcsclite.h ] || pkg_install pcsc-lite-devel
-  elif have apk;     then
-    pkg_install meson ninja flex gcc pkgconfig perl patch wget musl-dev libusb-dev zlib-dev
+  elif have apk; then
+    pkgs="flex gcc pkgconfig perl patch wget musl-dev libusb-dev zlib-dev"
+    [ "$need_meson" = 1 ] && pkgs="$pkgs meson ninja"
+    [ "$need_autotools" = 1 ] && pkgs="$pkgs autoconf automake libtool make"
+    # shellcheck disable=SC2086
+    pkg_install $pkgs
     [ -f /usr/include/PCSC/pcsclite.h ] || pkg_install pcsc-lite-dev
   fi
 }
 
-ensure_ccid_host() {
-  set_label="$1"
+# Download, patch, and install one upstream tag. Returns 0 on success, 1 on failure
+# (caller may fall back). Does not die — leaves diagnostics on stderr.
+build_ccid_version() {
+  version="$1"
+  set_label="$2"
+  patch_dir=$(patch_dir_for_version "$version")
   ccid_patches=$(patch_files_for_set "$set_label")
+
+  for p in $ccid_patches; do
+    [ -f "$patch_dir/$p" ] || { err "missing patch file: $patch_dir/$p"; return 1; }
+  done
+
+  info "building CCID driver $version from source — patch set '$set_label' from patches/$version/ ($ccid_patches)…"
+  ensure_build_deps "$version"
+
+  tmp=$(mktemp -d)
+
+  if ! (
+    cd "$tmp" \
+      && { curl -fsSLo ccid.tar.gz "https://github.com/LudovicRousseau/CCID/archive/refs/tags/${version}.tar.gz" \
+           || wget -qO ccid.tar.gz "https://github.com/LudovicRousseau/CCID/archive/refs/tags/${version}.tar.gz"; } \
+      && tar xf ccid.tar.gz && cd "CCID-${version}" \
+      && for p in $ccid_patches; do
+           echo "applying $p"
+           patch -p1 < "$patch_dir/$p" || exit 1
+         done \
+      && if [ -f meson.build ]; then
+           meson setup builddir \
+             && ninja -C builddir && ninja -C builddir install
+         else
+           # Pre-1.6.1 upstream: autotools only
+           ./bootstrap \
+             && ./configure \
+             && make -j"$(nproc 2>/dev/null || echo 2)" \
+             && make install
+         fi
+  ); then
+    rm -rf "$tmp"
+    err "build/patch failed for CCID $version (set: $set_label)"
+    return 1
+  fi
+  rm -rf "$tmp"
+  return 0
+}
+
+finalize_install() {
+  set_label="$1"
   drivers=$(drivers_dir)
   marker=$(marker_path "$set_label")
+
+  rm -f "$drivers/ifd-ccid.bundle/Contents/.hsic-ccid-"* 2>/dev/null || true
+  touch "$marker" 2>/dev/null || true
+
+  if have apt-mark; then apt-mark hold libccid >/dev/null 2>&1 || true; fi
+  if have systemctl; then systemctl restart pcscd 2>/dev/null || true; fi
+  info "patched CCID driver $CCID_VERSION (set: $set_label) installed to $drivers"
+}
+
+ensure_ccid_host() {
+  set_label="$1"
+  resolve_ccid_target
+  drivers=$(drivers_dir)
+  marker=$(marker_path "$set_label")
+
+  info "target CCID $CCID_VERSION — $CCID_RESOLVE_REASON"
+  if [ -n "$CCID_DETECTED" ]; then
+    info "detected installed libccid: $CCID_DETECTED"
+  fi
 
   if [ -f "$marker" ]; then
     info "patched CCID driver $CCID_VERSION (set: $set_label) already installed ($drivers)"
     return
   fi
 
-  info "building CCID driver $CCID_VERSION from source — patch set '$set_label' ($ccid_patches)…"
-  ensure_build_deps
+  primary="$CCID_VERSION"
+  if build_ccid_version "$primary" "$set_label"; then
+    finalize_install "$set_label"
+    return
+  fi
 
-  tmp=$(mktemp -d)
-  ( cd "$tmp" \
-    && { curl -fsSLo ccid.tar.gz "https://github.com/LudovicRousseau/CCID/archive/refs/tags/${CCID_VERSION}.tar.gz" \
-         || wget -qO ccid.tar.gz "https://github.com/LudovicRousseau/CCID/archive/refs/tags/${CCID_VERSION}.tar.gz"; } \
-    && tar xf ccid.tar.gz && cd "CCID-${CCID_VERSION}" \
-    && for p in $ccid_patches; do
-         echo "applying $p"
-         patch -p1 < "$REPO_DIR/patches/$p" || exit 1
-       done \
-    && meson setup builddir \
-    && ninja -C builddir && ninja -C builddir install \
-  ) || die "failed to build CCID driver $CCID_VERSION from source"
-  rm -rf "$tmp"
+  # Patch/build failed on a non-fallback target → retry known-good.
+  if [ "$primary" != "$FALLBACK_CCID_VERSION" ] && has_patch_dir "$FALLBACK_CCID_VERSION"; then
+    warn "retrying with fallback CCID $FALLBACK_CCID_VERSION"
+    CCID_VERSION=$(normalize_ccid_version "$FALLBACK_CCID_VERSION")
+    CCID_PATCH_DIR=$(patch_dir_for_version "$CCID_VERSION")
+    CCID_RESOLVE_REASON="fallback after failed build of $primary"
+    marker=$(marker_path "$set_label")
+    if [ -f "$marker" ]; then
+      info "patched CCID driver $CCID_VERSION (set: $set_label) already installed ($drivers)"
+      return
+    fi
+    if build_ccid_version "$CCID_VERSION" "$set_label"; then
+      finalize_install "$set_label"
+      return
+    fi
+  fi
 
-  rm -f "$drivers/ifd-ccid.bundle/Contents/.hsic-ccid-${CCID_VERSION}-"* 2>/dev/null || true
-  touch "$marker" 2>/dev/null || true
-
-  if have apt-mark; then apt-mark hold libccid >/dev/null 2>&1 || true; fi
-  if have systemctl; then systemctl restart pcscd 2>/dev/null || true; fi
-  info "patched CCID driver $CCID_VERSION (set: $set_label) installed to $drivers"
+  if [ "$primary" != "$FALLBACK_CCID_VERSION" ]; then
+    die "failed to build CCID driver (tried $primary and fallback $FALLBACK_CCID_VERSION)"
+  fi
+  die "failed to build CCID driver $primary from source"
 }
 
 cmd_install() {
@@ -132,7 +379,8 @@ cmd_install() {
   printf '\n'
   info "install complete"
   printf '   %sReader:%s  HSIC CCID-Reader (1d99:0016)\n' "$B" "$N"
-  printf '   %sPatch:%s   %s\n' "$B" "$N" "$set_label"
+  printf '   %sCCID:%s    %s (%s)\n' "$B" "$N" "$CCID_VERSION" "$CCID_RESOLVE_REASON"
+  printf '   %sPatch:%s   %s (from patches/%s/)\n' "$B" "$N" "$set_label" "$CCID_VERSION"
   printf '   %sCheck:%s   %s status\n' "$B" "$N" "$0"
   printf '   Replug the reader or restart pcscd, then test with: pcsc_scan\n'
 }
@@ -167,16 +415,31 @@ cmd_uninstall() {
 
 cmd_status() {
   drivers=$(drivers_dir)
-  printf '%sDriver dir:%s %s\n' "$B" "$N" "$drivers"
+  detected=$(detect_installed_ccid_version || true)
+  resolve_ccid_target
+
+  printf '%sDriver dir:%s     %s\n' "$B" "$N" "$drivers"
+  printf '%sDetected libccid:%s %s\n' "$B" "$N" "${detected:-unknown}"
+  printf '%sWould build:%s     %s (%s)\n' "$B" "$N" "$CCID_VERSION" "$CCID_RESOLVE_REASON"
+  printf '%sPatch dirs:%s      %s\n' "$B" "$N" "$(list_patch_versions | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+
   found=0
-  for set in slot atr all; do
-    m=$(marker_path "$set")
-    if [ -f "$m" ]; then
-      printf '%sInstalled:%s  patched CCID %s (set: %s)\n' "$B" "$N" "$CCID_VERSION" "$set"
-      found=1
-    fi
+  for m in "$drivers"/ifd-ccid.bundle/Contents/.hsic-ccid-*; do
+    [ -f "$m" ] || continue
+    base=$(basename "$m")
+    # .hsic-ccid-<version>-<set>  (set is slot|atr|all)
+    rest=${base#.hsic-ccid-}
+    case "$rest" in
+      *-slot) ver=${rest%-slot}; pset=slot ;;
+      *-atr)  ver=${rest%-atr};  pset=atr  ;;
+      *-all)  ver=${rest%-all};  pset=all  ;;
+      *)      ver=$rest; pset=unknown ;;
+    esac
+    printf '%sInstalled:%s       patched CCID %s (set: %s)\n' "$B" "$N" "$ver" "$pset"
+    found=1
   done
-  [ "$found" = 1 ] || printf '%sInstalled:%s  none (stock distro driver)\n' "$B" "$N"
+  [ "$found" = 1 ] || printf '%sInstalled:%s       none (stock distro driver)\n' "$B" "$N"
+
   if have pcsc_scan; then
     printf '\n%sTip:%s run `pcsc_scan` to verify the reader is detected.\n' "$B" "$N"
   fi
@@ -188,17 +451,24 @@ ${B}HSIC CCID-Reader libccid patch installer${N}
 
   $0 install [slot|atr|all]   build + install patched driver (default: slot)
   $0 uninstall                remove patch marker and reinstall distro libccid
-  $0 status                   show installed patch set
+  $0 status                   show detected version, target, and installed patch set
 
 ${B}Patch sets:${N}
   slot   base fix (01): card-presence via NotifySlotChange. Recommended default.
   atr    compatibility fix (02): synthesize missing ATR TCK byte.
   all    both patches (01 + 02) for quirky (U)SIMs.
 
-${B}Reader:${N} HSIC CCID-Reader USB 1d99:0016
-${B}Builds:${N} libccid $CCID_VERSION from https://github.com/LudovicRousseau/CCID
+${B}Version selection:${N}
+  Patch dirs: $(list_patch_versions | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+  Detected APT libccid is mapped to a family:
+    1.4/1.5 → 1.5.5 (Ubuntu 20.04–24.04) | 1.6/1.7 → 1.6.2 | 1.8+ → 1.8.2
+  Else fall back to $FALLBACK_CCID_VERSION; retry fallback on build failure.
+  Pin with CCID_VERSION=<tag>. Build: meson for >=1.6.1, autotools for 1.5.x.
 
-Env: CCID_VERSION(=$CCID_VERSION) PATCH_SET(=$PATCH_SET)
+${B}Reader:${N} HSIC CCID-Reader USB 1d99:0016
+${B}Upstream:${N} https://github.com/LudovicRousseau/CCID
+
+Env: CCID_VERSION(=auto) FALLBACK_CCID_VERSION(=$FALLBACK_CCID_VERSION) PATCH_SET(=$PATCH_SET)
 EOF
 }
 

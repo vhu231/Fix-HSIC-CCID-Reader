@@ -1,5 +1,3 @@
-diff --git a/src/commands.c b/src/commands.c
-index d8d1ae9..dfc8c31 100644
 --- a/src/commands.c
 +++ b/src/commands.c
 @@ -38,6 +38,7 @@
@@ -10,10 +8,10 @@ index d8d1ae9..dfc8c31 100644
  
  /* All the pinpad readers I used are more or less bogus
   * I use code to change the user command and make the firmware happy */
-@@ -78,6 +79,45 @@ static RESPONSECODE CmdXfrBlockTPDU_T1(unsigned int reader_index,
- static void i2dw(int value, unsigned char *buffer);
- static unsigned int bei2i(unsigned char *buffer);
- 
+@@ -84,6 +85,46 @@
+  *					CmdPowerOn
+  *
+  ****************************************************************************/
 +#define HSIC_CCID_READER 0x1D990016
 +
 +/*
@@ -21,14 +19,14 @@ index d8d1ae9..dfc8c31 100644
 + * Synthesize it (ISO 7816-3: XOR of T0 through last historical byte) so
 + * downstream ATR parsing and PTS negotiation proceed normally.
 + */
-+static void hsic_repair_atr(unsigned int reader_index, unsigned char *buffer,
++static void hsic_repair_atr(CcidDesc *ccid_reader, unsigned char *buffer,
 +	unsigned int *length)
 +{
 +	ATR_t atr;
 +	unsigned char tck;
 +	unsigned int i, len;
 +
-+	if (HSIC_CCID_READER != get_ccid_descriptor(reader_index)->readerID)
++	if (HSIC_CCID_READER != ccid_reader->device.ccid.readerID)
 +		return;
 +
 +	len = *length;
@@ -53,25 +51,24 @@ index d8d1ae9..dfc8c31 100644
 +	DEBUG_COMM2("HSIC CCID-Reader: appended missing TCK 0x%02X", tck);
 +}
 +
- 
- /*****************************************************************************
-  *
-@@ -287,6 +327,8 @@ again:
- 
- 	memcpy(buffer, resp+10, atr_len);
- 
-+	hsic_repair_atr(reader_index, buffer, nlength);
 +
+ RESPONSECODE CmdPowerOn(CcidDesc * ccid_reader, unsigned int * nlength,
+ 	unsigned char buffer[], int voltage)
+ {
+@@ -292,6 +333,8 @@
+ 	*nlength = atr_len;
+ 
+ 	memcpy(buffer, resp + CCID_HEADER_SIZE, atr_len);
++
++	hsic_repair_atr(ccid_reader, buffer, nlength);
+ 
  	return return_value;
  } /* CmdPowerOn */
- 
-diff --git a/src/ifdhandler.c b/src/ifdhandler.c
-index b746dfb..5112efd 100644
 --- a/src/ifdhandler.c
 +++ b/src/ifdhandler.c
-@@ -725,7 +725,29 @@ EXTERNAL RESPONSECODE IFDHSetProtocolParameters(DWORD Lun, DWORD Protocol,
- 	atr_ret = ATR_InitFromArray(&atr, ccid_slot->pcATRBuffer,
- 		ccid_slot->nATRLength);
+@@ -818,7 +818,29 @@
+ 	atr_ret = ATR_InitFromArray(&atr, ccid_reader->pcATRBuffer,
+ 		ccid_reader->nATRLength);
  	if (ATR_MALFORMED == atr_ret)
 +	{
 +		/*
@@ -88,7 +85,7 @@ index b746dfb..5112efd 100644
 +				0x00	/* clock stop */
 +			};
 +			DEBUG_INFO1("HSIC CCID-Reader: malformed ATR accepted, applying default T=0 parameters");
-+			(void)SetParameters(reader_index, 0, sizeof(t0_default_param),
++			(void)SetParameters(ccid_reader, 0, sizeof(t0_default_param),
 +				t0_default_param);
 +			ccid_desc->readTimeout = DEFAULT_COM_READ_TIMEOUT;
 +			ccid_desc->cardProtocol = Protocol;

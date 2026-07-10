@@ -32,23 +32,31 @@
 
 ## 快速开始
 
+**一键安装**（克隆 + 探测 libccid + 编译 + 安装）：
+
+```bash
+# 推荐：仅卡在位检测修复
+curl -fsSL https://raw.githubusercontent.com/vhu231/Fix-HSIC-CCID-Reader/master/oneclick.sh | sudo sh
+
+# 同时启用 ATR / SCardConnect 607 修复
+curl -fsSL https://raw.githubusercontent.com/vhu231/Fix-HSIC-CCID-Reader/master/oneclick.sh | sudo sh -s -- all
+```
+
+或从本地克隆：
+
 ```bash
 git clone https://github.com/vhu231/Fix-HSIC-CCID-Reader.git
 cd Fix-HSIC-CCID-Reader
-chmod +x install.sh
-
-# 推荐：基础卡在位检测修复（对合规卡安全，含物理 eSIM）
-sudo ./install.sh install slot
-
-# 若 SCardConnect 仍报 607 错误，可再启用 ATR 修复
-sudo ./install.sh install all
-
+sudo ./oneclick.sh          # 等同于: sudo ./install.sh install slot
+sudo ./oneclick.sh all      # slot + ATR
 ./install.sh status
 ```
 
-重新插拔读卡器或重启 `pcscd`，然后用 `pcsc_scan` 验证。
+`oneclick` / `install` 会自动探测本机 `libccid`/`ccid` 包版本，从下面三个补丁族中选一个，构建对应上游版本并覆盖发行版驱动。然后重新插拔读卡器或重启 `pcscd`，用 `pcsc_scan` 验证。
 
 ## 补丁集
+
+每个族目录里都是同一组补丁文件：
 
 | 集 | 补丁 | 修复内容 |
 |----|------|----------|
@@ -58,22 +66,46 @@ sudo ./install.sh install all
 
 **兼容性：** 对符合标准的卡（含物理 eSIM），仅 `slot` 通常即可。只有遇到 ATR / `SCardConnect` 错误时才需要 `atr` 或 `all`。
 
+## 版本族（Ubuntu 20.04+）
+
+只保留 **三个** 补丁目录。安装脚本把探测到的 APT `libccid` 版本映射到对应族并构建该上游标签（会整包替换 IFD 驱动，无需为每个 APT 小版本单独留目录）：
+
+| 族目录 | 构建上游 | Ubuntu / APT `libccid` | 构建系统 |
+|--------|----------|------------------------|----------|
+| `patches/1.5.5/` | **1.5.5** | 20.04–24.04（`1.4.31` … `1.5.5`） | autotools |
+| `patches/1.6.2/` | **1.6.2** | 24.10–26.04（`1.6.1` … `1.7.1`） | meson |
+| `patches/1.8.2/` | **1.8.2** | devel / 1.8+（`1.8.x`） | meson（指针 API） |
+
+选型规则：
+
+1. 若存在精确目录 `patches/<detected>/` 则用之  
+2. 否则按族映射：`1.4/1.5 → 1.5.5`，`1.6/1.7 → 1.6.2`，`1.8+ → 1.8.2`  
+3. 否则回退到 **1.6.2**  
+4. 非回退目标打补丁/编译失败时，再试 **1.6.2**
+
+说明：
+
+- **1.5.5** 族还会改 `readers/supported_readers.txt`，以便识别 `1d99:0016`（上游自 1.6.2 起才收录 HSIC）。
+- 其他发行版只要包版本能归一到上述某一族，行为相同。
+- 重新生成补丁：源码放入 `.ccid-src/` 后执行 `python3 tools/gen_ubuntu_patches.py`。
+
 ## 系统要求
 
 - 已安装 pcsc-lite（`pcscd`）的 Linux 系统
 - 安装/卸载需要 root 权限
-- 构建工具：meson、ninja、gcc、flex、libusb、zlib（安装脚本会通过包管理器自动安装）
-
-驱动基于上游 [libccid/ccid 1.6.2](https://github.com/LudovicRousseau/CCID) 构建，该版本已在支持读卡器列表中包含 `1d99:0016`。较旧发行版 `libccid`/`ccid` 包（< 1.6.2）可能无法识别该 VID/PID，需手动编辑 `Info.plist` —— 本构建无需此步骤。
+- 构建工具（脚本自动安装）：gcc、flex、libusb、zlib、patch；1.6.2 / 1.8.2 族用 **meson/ninja**，1.5.5 族用 **autoconf/automake**
 
 ## 配置
 
 可在 `install.sh` 同目录下创建可选的 `.env` 文件：
 
 ```bash
-CCID_VERSION=1.6.2   # 要构建的上游 libccid 标签
-PATCH_SET=slot       # `install` 无参数时的默认补丁集
+# CCID_VERSION=1.5.5          # 固定已提供的族（或可映射到该族的 APT 版本）
+# FALLBACK_CCID_VERSION=1.6.2 # 探测/构建失败时的已知可用回退版本
+PATCH_SET=slot                  # `install` 无参数时的默认补丁集
 ```
+
+`./install.sh status` 会显示探测到的包版本、将要构建的族，以及已安装的补丁标记。
 
 ## 卸载
 
